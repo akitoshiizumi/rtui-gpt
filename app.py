@@ -1,120 +1,99 @@
-import streamlit as st
-import openai
-import io
 import os
-from dotenv import load_dotenv
-import websocket
+import ssl
 import json
+import asyncio
+import threading
+import nest_asyncio
+from dotenv import load_dotenv
+import streamlit as st
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
+import websockets
 import base64
-import numpy as np
-from pydub import AudioSegment
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
-import struct
+import av
 
-st.set_page_config(page_title="Realtime Voice Chat (OpenAI Realtime API)")
-st.title("Realtime Voice Chat (OpenAI Realtime API)")
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
 
+# Load OpenAI API key from .env
 load_dotenv()
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    openai_api_key = st.text_input("OpenAI API Key", type="password")
+API_KEY = os.getenv("OPENAI_API_KEY")
+MODEL = "gpt-4o-realtime-preview-2024-10-01"
+WS_URL = f"wss://api.openai.com/v1/realtime?model={MODEL}"
 
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
+st.title("🎤 リアルタイム音声チャット (Streamlit + OpenAI Realtime API)")
+if not API_KEY:
+    st.error("`OPENAI_API_KEY` を `.env` に設定してください。")
+    st.stop()
 
-for role, content in st.session_state.messages:
-    with st.chat_message(role):
-        st.markdown(content)
-
+# Audio processor
 class AudioProcessor(AudioProcessorBase):
     def __init__(self):
-        self.audio_buffer = b""
-    def recv(self, frame):
-        audio_bytes = frame.to_ndarray().tobytes()
-        self.audio_buffer += audio_bytes
+        self.buffer = b""
+        self.lock = threading.Lock()
+
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        pcm = frame.to_ndarray().tobytes()
+        with self.lock:
+            self.buffer += pcm
         return frame
 
-audio_ctx = webrtc_streamer(
+# Use public STUN server for ICE negotiation
+webrtc_ctx = webrtc_streamer(
     key="audio",
     mode=WebRtcMode.SENDONLY,
-    audio_receiver_size=1024,
-    media_stream_constraints={
-        "audio": True,
-        "video": False,
-    },
-    rtc_configuration={
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    },
     audio_processor_factory=AudioProcessor,
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}],
+        "iceTransportPolicy": "all"
+    },
 )
 
-def float_to_16bit_pcm(float32_array):
-    clipped = np.clip(float32_array, -1.0, 1.0)
-    pcm16 = b''.join(struct.pack('<h', int(x * 32767)) for x in clipped)
-    return pcm16
+async def run_realtime(audio_proc, text_placeholder):
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
 
-if audio_ctx and audio_ctx.audio_processor:
-    if st.button("送信（録音停止後クリック）") and openai_api_key:
-        audio_bytes = audio_ctx.audio_processor.audio_buffer
-        if not audio_bytes:
-            st.warning("音声データがありません")
-        else:
-            segment = AudioSegment(
-                data=audio_bytes,
-                sample_width=2,
-                frame_rate=16000,
-                channels=1
-            )
-            samples = np.array(segment.get_array_of_samples()).astype(np.float32) / 32768.0
-            chunk_size = 16000  # 1秒分（16kHz, 1ch）
-            ws = websocket.create_connection(
-                "wss://api.openai.com/v1/realtime/conversations",
-                header={"Authorization": f"Bearer {openai_api_key}"}
-            )
-            session_event = {
-                "type": "session.update",
-                "session": {
-                    "model": "gpt-4o-realtime-preview",
-                    "voice": "alloy",
-                    "instructions": "あなたは親切なアシスタントです。"
-                }
+    headers = {"Authorization": f"Bearer {API_KEY}", "OpenAI-Beta": "realtime=v1"}
+    async with websockets.connect(WS_URL, extra_headers=headers, ssl=ssl_ctx) as ws:
+        session_cfg = {
+            "type": "session.update",
+            "session": {
+                "modalities": ["audio", "text"],
+                "instructions": "You are a helpful assistant.",
+                "voice": "alloy",
+                "input_audio_format": "pcm16",
+                "output_audio_format": "pcm16",
+                "input_audio_transcription": {"model": "whisper-1"},
+                "turn_detection": {"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 600},
+                "temperature": 0.6
             }
-            ws.send(json.dumps(session_event))
-            # チャンクごとに送信
-            for i in range(0, len(samples), chunk_size):
-                chunk = samples[i:i+chunk_size]
-                pcm16 = float_to_16bit_pcm(chunk)
-                audio_b64 = base64.b64encode(pcm16).decode("ascii")
-                event = {
-                    "type": "input_audio_buffer.append",
-                    "audio": audio_b64
-                }
-                ws.send(json.dumps(event))
-            # 入力完了を通知
-            ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-            # 応答生成リクエスト
-            response_event = {
-                "type": "response.create",
-                "response": {
-                    "modalities": ["text"]
-                }
-            }
-            ws.send(json.dumps(response_event))
-            assistant_text = ""
-            with st.spinner("Waiting for response..."):
-                while True:
-                    result = ws.recv()
-                    event = json.loads(result)
-                    if event.get("type") == "response.text.delta":
-                        delta = event["delta"]
-                        assistant_text += delta
-                        st.session_state.messages.append(("assistant", assistant_text))
-                        st.experimental_rerun()
-                    if event.get("type") == "response.done":
-                        if event["response"]["output"]:
-                            assistant_text = event["response"]["output"][0]
-                        break
-            ws.close()
-            st.session_state.messages.append(("assistant", assistant_text))
-            with st.chat_message("assistant"):
-                st.markdown(assistant_text)
+        }
+        await ws.send(json.dumps(session_cfg))
+        await ws.send(json.dumps({"type": "response.create"}))
+        text_placeholder.text("🟢 Connected. Speak now...")
+
+        async def recv_loop():
+            async for msg in ws:
+                evt = json.loads(msg)
+                if evt.get("type") == "response.text.delta":
+                    prev = text_placeholder._value or ""
+                    text_placeholder.text(prev + evt["delta"])
+
+        recv_task = asyncio.create_task(recv_loop())
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                with audio_proc.lock:
+                    if audio_proc.buffer:
+                        chunk = audio_proc.buffer
+                        audio_proc.buffer = b""
+                        await ws.send(json.dumps({"type": "input.audio.buffer", "audio": base64.b64encode(chunk).decode()}))
+        except asyncio.CancelledError:
+            pass
+        finally:
+            recv_task.cancel()
+
+if webrtc_ctx.state.playing:
+    placeholder = st.empty()
+    if st.button("Start Conversation"):
+        asyncio.run(run_realtime(webrtc_ctx.audio_processor, placeholder))

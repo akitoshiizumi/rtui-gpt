@@ -1,8 +1,6 @@
 streamlit
-openai
-python-dotenv
-websocket-client
-soundfile
-numpy
-pydub
 streamlit-webrtc
+av
+websockets<14.0
+python-dotenv
+nest_asyncio        # 追加
