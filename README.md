@@ -1,35 +1,34 @@
-# rtui-gpt
+# Voice Agent Quickstart
 
-This repository contains a simple Streamlit application that demonstrates a realtime voice chat interface using OpenAI APIs.
+This project demonstrates a realtime voice assistant using the [OpenAI Agents SDK](https://github.com/openai/openai-agents-js).
+The server issues ephemeral client tokens which the browser uses to connect to the Realtime API.
 
 ## Requirements
 
-- Python 3.12
-- ffmpeg (for audio processing)
-- See `requirements.txt` for Python dependencies.
+- Node.js >= 18
+- An OpenAI API key with access to the Realtime API
 
-### Installing ffmpeg
+## Setup
 
-Ubuntu/Debian:
-
-```bash
-sudo apt-get update && sudo apt-get install -y ffmpeg
-```
-
-macOS (with Homebrew):
+1. Install dependencies:
 
 ```bash
-brew install ffmpeg
+npm install
 ```
 
-## Usage
-
-Install the requirements and run the Streamlit app:
+2. Copy `.env.example` to `.env` and set your `OPENAI_API_KEY`:
 
 ```bash
-pip install -r requirements.txt
-streamlit run app.py
+cp .env.example .env
+# edit .env
 ```
 
-When the app loads, enter your OpenAI API key, record your message, and the assistant will reply using the Chat Completion API.
+3. Start the server:
 
+```bash
+npm start
+```
+
+Visit [http://localhost:3000](http://localhost:3000) and click **Start Conversation**.
+Grant microphone access and you can speak with the assistant. Both sides of the
+conversation are displayed on the page.

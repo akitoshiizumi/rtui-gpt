@@ -1,6 +1,0 @@
-streamlit
-streamlit-webrtc
-av
-websockets<14.0
-python-dotenv
-nest_asyncio        # 追加
